@@ -30,24 +30,29 @@ cd migpt-next-2
 
 > 不会用命令行？也可以直接在 GitHub 页面右上角 **Download ZIP** 下载后解压。
 
-**第 3 步：修改配置 `config.js`**
+**第 3 步：填写凭证 `.env`**
 
-在根目录打开 `config.js`，按注释把下面三处改成你自己的：
+凭证不写在代码里，统一放在根目录的 `.env`（已被 `.gitignore` 忽略，不会被提交）：
 
-```js
-export default {
-  speaker: {
-    userId: "你的小米ID（一串数字）",
-    password: "你的小米密码",
-    did: "小爱音箱在米家里显示的名字",
-  },
-  openai: {
-    baseURL: "模型地址，例如 https://ark.cn-beijing.volces.com/api/v3",
-    apiKey: "你的 API Key",
-    model: "模型名，例如豆包 ep-2026xxxxx",
-  },
-};
+```shell
+cp .env.example .env
 ```
+
+然后打开 `.env` 把下面几项改成你自己的：
+
+```ini
+MI_SPEAKER_DID=小爱音箱在米家里显示的名字
+MI_USER_ID=你的小米ID（一串数字）
+MI_PASSWORD=你的小米密码
+# 登录失败时改用 passToken
+MI_PASS_TOKEN=
+
+OPENAI_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+OPENAI_API_KEY=你的 API Key
+OPENAI_MODEL=模型名，例如豆包 ep-2026xxxxx
+```
+
+`config.js` 里的 `speaker`、`openai`、`tts` 都通过 `env('键名', '占位符')` 读取这些变量，改音色用 `TTS_VOICE_ID`。
 
 **第 4 步：构建镜像并运行**
 
@@ -56,17 +61,18 @@ export default {
 ```shell
 pnpm install && pnpm build   # 首次使用：安装依赖、生成产物
 docker build -f Dockerfile.local -t migpt-next:local .   # 打包成镜像
-docker run -it --rm -v $(pwd)/config.js:/app/config.js migpt-next:local   # 运行
+docker run -it --rm --env-file .env -v $(pwd)/config.js:/app/config.js migpt-next:local   # 运行
 ```
 
 这几条命令在做什么（不理解可跳过）：
 - `docker build ... -t migpt-next:local .`：把当前目录打包成一个名为 `migpt-next:local` 的镜像；
+- `docker run ... --env-file .env`：把 `.env` 里的凭证作为环境变量传进容器；
 - `docker run ... -v $(pwd)/config.js:/app/config.js`：把外面的 `config.js` 映射进容器。这样以后改配置**不用重新打包**，改完重启即可。
 
 **第 5 步：日常操作**
 - 停止运行：在终端按 `Ctrl + C`；
 - 改完配置后重跑：直接再执行第 4 步的 `docker run` 命令即可；
-- 想 24 小时后台常驻：把 `docker run` 改成 `docker run -d --restart=always -v $(pwd)/config.js:/app/config.js migpt-next:local`（去掉 `-it --rm`，加 `-d --restart=always`），这样服务会在后台一直运行，设备重启后也会自动拉起。
+- 想 24 小时后台常驻：把 `docker run` 改成 `docker run -d --restart=always --env-file .env -v $(pwd)/config.js:/app/config.js migpt-next:local`（去掉 `-it --rm`，加 `-d --restart=always`），这样服务会在后台一直运行，设备重启后也会自动拉起。
 
 > 💡 想让它联网回答实时问题？在 `config.js` 里把 `openai.webSearch.enabled` 设为 `true` 即可。
 
@@ -74,9 +80,9 @@ docker run -it --rm -v $(pwd)/config.js:/app/config.js migpt-next:local   # 运�
 
 **本项目以 Docker 部署为主**，Windows / macOS / Linux / NAS 通用。如果你不想用 Docker，也有以下方式：
 
-- **飞牛 NAS（fnOS）**：飞牛自带「Docker」应用。把代码放进 NAS（比如 `/vol1/docker/migpt-next`），改好 `config.js`，然后在飞牛的 Docker 应用里「构建镜像 + 创建容器」即可（就是上面的命令，有图形界面）；也可以 SSH 到 NAS 终端直接执行命令。NAS 常开，正好适合让音箱服务 24 小时在线。
+- **飞牛 NAS（fnOS）**：飞牛自带「Docker」应用。把代码放进 NAS（比如 `/vol1/docker/migpt-next`），填好 `.env`，然后在飞牛的 Docker 应用里「构建镜像 + 创建容器」即可（就是上面的命令，有图形界面）；也可以 SSH 到 NAS 终端直接执行命令。NAS 常开，正好适合让音箱服务 24 小时在线。
 - **其他 NAS（群晖 / 威联通）**：思路一样，都是基于 Docker，用系统自带的 Docker / Container Manager 操作即可。
-- **直接跑 Node.js**：本项目本质是 Node.js 应用。在有 Node 16+ 的机器上安装依赖并构建，再写一个入口脚本调用 `MiGPT.start(config)` 启动。适合熟悉 Node 的用户，新手不推荐。
+- **直接跑 Node.js**：本项目本质是 Node.js 应用。在有 Node 16+ 的机器上 `pnpm install && pnpm build`，再执行 `pnpm start` 即可（入口见根目录 `main.mjs`，它会自动加载 `.env`）。
 
 ## ✨ 本版增强亮点
 
@@ -109,12 +115,15 @@ MiOT 请求自动读取 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`（含小写�
 ### 5. 非流式问答
 `askAI(msg, { stream: false })` 走一次性补全而非流式输出——也是联网搜索生效的前提，配合 `onMessage` 可实现更稳定的单次问答。
 
-## 本地构建
+## 本地构建与运行
 
 ```shell
 pnpm install
 pnpm build
+pnpm start   # 等价于 node main.mjs，会自动加载根目录 .env
 ```
+
+凭证只放在 `.env`（已 gitignore），`config.js` 里只有占位符，因此可以放心提交到仓库。
 
 ## 常见问题
 

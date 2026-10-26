@@ -1,7 +1,9 @@
 {
   "name": "packages",
   "private": true,
+  "type": "module",
   "scripts": {
+    "start": "node main.mjs",
     "build": "turbo run build",
     "postinstall": "[ -n \"$CI\" ] || lefthook install",
     "publish-packages": "changeset version && turbo run build && changeset publish && git push --follow-tags"

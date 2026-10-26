@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import config from '../config.js';
+import baseConfig from '../config.js';
 
-function createEngine(calls, { abortResult = true } = {}) {
+/** 这些用例只验证文本播报链路，关掉语音合成避免真的发起网络请求 */
+const config = { ...baseConfig, tts: { ...baseConfig.tts, enabled: false } };
+
+function createEngine(calls, { abortResult = true, answer = '这是豆包返回的答案' } = {}) {
   return {
     config,
     speaker: {
@@ -20,7 +23,7 @@ function createEngine(calls, { abortResult = true } = {}) {
     },
     async askAI(receivedMessage, options) {
       calls.push(['askAI', receivedMessage.text, options]);
-      return { text: '这是豆包返回的答案' };
+      return { text: answer };
     },
   };
 }
@@ -43,9 +46,9 @@ test('uses the L05B MIoT text action for thinking and the AI answer', async () =
   const reply = await config.onMessage(engine, message);
 
   assert.deepEqual(calls, [
+    ['askAI', message.text, { stream: false }],
     ['abort'],
     ['tts', 5, 3, '正在思考中'],
-    ['askAI', message.text, { stream: false }],
     ['tts', 5, 3, '这是豆包返回的答案'],
   ]);
   assert.deepEqual(reply, { handled: true });
@@ -98,12 +101,89 @@ test('uses the external LLM for explicit XiaoAI failure answers', async () => {
     await config.onMessage(createEngine(calls), message);
 
     assert.deepEqual(calls, [
+      ['askAI', message.text, { stream: false }],
       ['abort'],
       ['tts', 5, 3, '正在思考中'],
-      ['askAI', message.text, { stream: false }],
       ['tts', 5, 3, '这是豆包返回的答案'],
     ]);
   }
+});
+
+test('falls back to MiNA TTS when the MIoT text action fails', async () => {
+  const calls = [];
+  const engine = {
+    config,
+    speaker: {
+      async abortXiaoAI() {
+        calls.push(['abort']);
+        return true;
+      },
+      async play({ text }) {
+        calls.push(['mina', text]);
+        return true;
+      },
+    },
+    MiOT: {
+      async doAction(siid, aiid, text) {
+        calls.push(['miot', siid, aiid, text]);
+        return false;
+      },
+    },
+    async askAI() {
+      calls.push(['askAI']);
+      return { text: '退化为 MiNA 播放' };
+    },
+  };
+
+  await config.onMessage(engine, {
+    id: 'message-fallback',
+    sender: 'user',
+    text: '小爱不会的问题',
+    timestamp: 200,
+    metadata: { xiaoAIAnswer: '被你问住了', xiaoAIAnswerType: 'TTS' },
+  });
+
+  // 思考提示与 LLM 并行，占位阶段两类播报的先后不固定，这里只校验集合
+  const key = (call) => JSON.stringify(call);
+  assert.deepEqual(
+    calls.map(key).sort(),
+    [
+      ['abort'],
+      ['miot', 5, 3, '正在思考中'],
+      ['mina', '正在思考中'],
+      ['askAI'],
+      ['miot', 5, 3, '退化为 MiNA 播放'],
+      ['mina', '退化为 MiNA 播放'],
+    ]
+      .map(key)
+      .sort(),
+  );
+  // 回答的播报必须在思考提示之后
+  assert.deepEqual(calls.slice(-2), [
+    ['miot', 5, 3, '退化为 MiNA 播放'],
+    ['mina', '退化为 MiNA 播放'],
+  ]);
+});
+
+test('splits long answers to fit the TTS length limit', async () => {
+  const calls = [];
+  const longAnswer = `${'很长的回答，'.repeat(30)}结束。`;
+  const engine = createEngine(calls, { answer: longAnswer });
+
+  await config.onMessage(engine, {
+    id: 'message-long',
+    sender: 'user',
+    text: '小爱不会的问题',
+    timestamp: 300,
+    metadata: { xiaoAIAnswer: '被你问住了', xiaoAIAnswerType: 'TTS' },
+  });
+
+  const played = calls.filter((call) => call[0] === 'tts' && call[3] !== '正在思考中');
+  assert.ok(played.length > 1);
+  for (const [, , , text] of played) {
+    assert.ok(text.length <= 100, `chunk too long: ${text.length}`);
+  }
+  assert.equal(played.map((call) => call[3]).join(''), longAnswer);
 });
 
 test('continues to the thinking prompt when native playback cannot be stopped', async () => {
@@ -125,9 +205,9 @@ test('continues to the thinking prompt when native playback cannot be stopped', 
 
   assert.match(warnings[0], /未能确认已停止小爱原生播报/);
   assert.deepEqual(calls, [
+    ['askAI', '小爱不会的问题', { stream: false }],
     ['abort'],
     ['tts', 5, 3, '正在思考中'],
-    ['askAI', '小爱不会的问题', { stream: false }],
     ['tts', 5, 3, '这是豆包返回的答案'],
   ]);
 });
