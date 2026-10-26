@@ -54,6 +54,10 @@ OPENAI_MODEL=模型名，例如豆包 ep-2026xxxxx
 
 `config.js` 里的 `speaker`、`openai`、`tts` 都通过 `env('键名', '占位符')` 读取这些变量，改音色用 `TTS_VOICE_ID`。
 
+语音来源可以随时切换：
+- `TTS_PROVIDER=minimax`（默认）：MiniMax 合成，音色自然，约 1.5-2s 出声；
+- `TTS_PROVIDER=xiaoai`：小爱原生 TTS，约 0.6s 出声，音色机械，长文本会分段。
+
 **第 4 步：构建镜像并运行**
 
 在仓库根目录依次执行下面三条命令（首次使用需先执行第一、二条）：

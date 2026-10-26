@@ -118,6 +118,7 @@ function env(key, fallback = '') {
 /** MiniMax 语音合成默认参数（未填写的字段会回落到这里） */
 const kDefaultTTSConfig = {
   enabled: true,
+  provider: 'minimax',
   model: 'speech-2.8-turbo',
   /** 音色 ID，可在 MiniMax 控制台「音色管理」查看 */
   voiceId: 'male-qn-qingse',
@@ -149,6 +150,22 @@ const kContentType = {
   pcm: 'audio/wave',
   flac: 'audio/flac',
 };
+
+/**
+ * 解析当前使用的语音来源。
+ *
+ * - `minimax`：MiniMax 合成后再播放（音色自然，约 1.5-2s 出声）
+ * - `xiaoai`：小爱原生 TTS 直接播文本（约 0.6s 出声，音色机械）
+ *
+ * 兼容旧配置：`tts.enabled === false` 等价于 `xiaoai`。
+ */
+function resolveTTSProvider(tts) {
+  if (tts?.enabled === false) {
+    return 'xiaoai';
+  }
+  const provider = String(tts?.provider ?? 'minimax').toLowerCase();
+  return provider === 'xiaoai' ? 'xiaoai' : 'minimax';
+}
 
 /** 去掉 Markdown / 链接等不该被念出来的内容 */
 function toSpeakableText(text) {
@@ -391,15 +408,20 @@ export default {
     },
   },
   /**
-   * 外接 LLM 回答的语音合成（MiniMax T2A）
+   * 外接 LLM 回答的语音播报
    *
-   * 流程：LLM 文字 → MiniMax 合成 mp3 → 本地静态服务托管 → 小爱播放音频链接
-   * 合成失败会自动回退到 MIoT「播放文本」。
+   * 语音来源开关：
+   * - 'minimax'（默认）：MiniMax 合成 mp3 → 本地静态服务托管 → 小爱播放音频链接，音色自然，约 1.5-2s 出声；
+   * - 'xiaoai'：直接用小爱原生 TTS 播文本，约 0.6s 出声，音色机械、长文本会分段，且可能被小爱原生播报复盖。
+   *
+   * 也可用环境变量 TTS_PROVIDER 切换；MiniMax 合成失败会自动回退到原生 TTS。
    */
   tts: {
+    provider: env('TTS_PROVIDER', 'minimax'),
+    /** 兼容旧配置：设为 false 等价于 provider: 'xiaoai' */
     enabled: true,
     /** 语音模型 */
-    model: 'speech-2.8-turbo',
+    model: env('TTS_MODEL', 'speech-2.8-turbo'),
     /** 音色 ID（MiniMax 控制台「音色管理」里的 voice_id） */
     voiceId: env('TTS_VOICE_ID', 'male-qn-qingse'),
     speed: 1,
@@ -516,8 +538,14 @@ export default {
     const llmAt = Date.now();
 
     if (text) {
+      const ttsProvider = resolveTTSProvider(engine.config?.tts);
+      const voiceLabel =
+        ttsProvider === 'minimax'
+          ? `MiniMax ${engine.config?.tts?.model ?? kDefaultTTSConfig.model}`
+          : '小米原生 TTS';
+
       let played = false;
-      if (engine.config?.tts?.enabled !== false) {
+      if (ttsProvider === 'minimax') {
         try {
           played = await playMiniMax(engine, text);
         } catch (error) {
@@ -532,8 +560,8 @@ export default {
       const doneAt = Date.now();
       console.log(
         played
-          ? `✅ 回答来源：外接 LLM 已播报｜${text}`
-          : `❌ 回答来源：外接 LLM 播报失败（指令未生效）｜${text}`,
+          ? `✅ 回答来源：外接 LLM（语音：${voiceLabel}）已播报｜${text}`
+          : `❌ 回答来源：外接 LLM 播报失败（语音：${voiceLabel}，指令未生效）｜${text}`,
       );
       console.log(
         `⏱️ 耗时 ${doneAt - startAt}ms（打断+占位 ${promptAt - startAt}ms，等 LLM ${llmAt - promptAt}ms，语音 ${doneAt - llmAt}ms；LLM 实际 ${llmMs}ms）`,

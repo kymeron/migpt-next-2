@@ -211,3 +211,48 @@ test('continues to the thinking prompt when native playback cannot be stopped', 
     ['tts', 5, 3, '这是豆包返回的答案'],
   ]);
 });
+
+test('switches to Xiaomi native TTS when tts.provider is xiaoai', async () => {
+  const calls = [];
+  const engine = {
+    config: { ...config, tts: { ...config.tts, enabled: true, provider: 'xiaoai' } },
+    speaker: {
+      async abortXiaoAI() {
+        calls.push(['abort']);
+        return true;
+      },
+      async play({ text, url }) {
+        calls.push(['play', url ? 'url' : text]);
+        return true;
+      },
+    },
+    MiOT: {
+      async doAction(_siid, _aiid, text) {
+        calls.push(['miot', text]);
+        // L05B 不支持 MIoT 播放文本，回退 MiNA 原生 TTS
+        return false;
+      },
+    },
+    async askAI() {
+      return { text: '小米原生播报' };
+    },
+  };
+
+  await config.onMessage(engine, {
+    id: 'message-xiaoai-tts',
+    sender: 'user',
+    text: '小爱不会的问题',
+    timestamp: 400,
+    metadata: { xiaoAIAnswer: '被你问住了', xiaoAIAnswerType: 'TTS' },
+  });
+
+  // 走原生 TTS 时不应出现 MiniMax 的音频链接播放
+  assert.equal(
+    calls.some(([type, value]) => type === 'play' && value === 'url'),
+    false,
+  );
+  assert.deepEqual(
+    calls.filter(([type, value]) => type === 'play' && value !== '正在思考中'),
+    [['play', '小米原生播报']],
+  );
+});
