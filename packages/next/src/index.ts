@@ -14,6 +14,13 @@ export type MiGPTConfig = Prettify<
   EngineConfig<MiJiaEngine> &
     DeepPartial<{
       debug: boolean;
+      /**
+       * 判断某条消息是否跳过「等待小爱原生回答」
+       *
+       * 返回 true 时，轮询到这条消息就立即交给 onMessage 处理，
+       * 不再等待小爱生成回答（可省掉最多 2s 的延迟，适合语音控制电脑这类自定义指令）。
+       */
+      shouldSkipNativeAnswerWait?: (text: string) => boolean;
       speaker: MiServiceConfig & {
         /**
          * 消息轮询间隔（毫秒）
@@ -61,6 +68,8 @@ class MiJiaEngine extends MiGPTEngine {
     await super.start(deepMerge(kDefaultMiGPTConfig, config));
 
     await MiService.init(this.config as any);
+
+    MiMessage.setSkipNativeAnswerWait(this.config.shouldSkipNativeAnswerWait);
 
     console.log('✅ 服务已启动...');
 

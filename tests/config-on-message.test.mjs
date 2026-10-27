@@ -256,3 +256,80 @@ test('switches to Xiaomi native TTS when tts.provider is xiaoai', async () => {
     [['play', '小米原生播报']],
   );
 });
+
+test('keeps PC control disabled by default', () => {
+  assert.equal(baseConfig.pcControl?.enabled, false);
+});
+
+test('runs a whitelisted PC command without calling the LLM', async () => {
+  const calls = [];
+  const engine = {
+    config: {
+      ...config,
+      pcControl: {
+        enabled: true,
+        muteMs: 0,
+        commands: { 测试指令: ['/bin/echo', ['ok']] },
+      },
+    },
+    speaker: {
+      async abortXiaoAI() {
+        calls.push(['abort']);
+        return true;
+      },
+      async play({ text, url }) {
+        calls.push(['play', url ? 'url' : text]);
+        return true;
+      },
+    },
+    MiOT: {
+      async doAction(_siid, _aiid, text) {
+        calls.push(['miot', text]);
+        return false;
+      },
+    },
+    async askAI() {
+      calls.push(['askAI']);
+      return { text: '不该走到模型' };
+    },
+  };
+
+  const reply = await config.onMessage(engine, {
+    id: 'message-pc',
+    sender: 'user',
+    text: '小爱同学，帮我测试指令',
+    timestamp: 500,
+  });
+
+  assert.deepEqual(reply, { handled: true });
+  assert.equal(calls.some(([type]) => type === 'askAI'), false);
+  assert.deepEqual(calls.at(-1), ['play', '好的，已执行']);
+});
+
+test('ignores texts that are not in the PC command whitelist', async () => {
+  const calls = [];
+  const engine = {
+    config: {
+      ...config,
+      pcControl: { enabled: true, muteMs: 0, commands: { 测试指令: ['/bin/echo'] } },
+    },
+    speaker: {
+      async abortXiaoAI() {
+        return true;
+      },
+    },
+    async askAI() {
+      calls.push(['askAI']);
+      return { text: '' };
+    },
+  };
+
+  await config.onMessage(engine, {
+    id: 'message-pc-miss',
+    sender: 'user',
+    text: '今天天气怎么样',
+    timestamp: 501,
+  });
+
+  assert.deepEqual(calls, [['askAI']]);
+});

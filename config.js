@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
@@ -6,7 +7,7 @@ import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 function isXiaoAIAnswerFailure(text) {
-  return /(?:我(?:还|暂时|暂不|也)?(?:不知道|不知道咋说|不太清楚|不支持|不会|回答不上)|不太清楚|无法(?:回答|理解|获取|处理)|没法回答|回答不了|没听懂|不明白.{0,8}(?:说|意思)|换个问题|我还在学习|(?:你|我).{0,4}(?:问住|难住)了|被难住了(?:诶|呢|呀|哦)?|暂不支持(?:该|此)?功能|不知道咋说|还.{0,4}(?:支持.{0,6}功能|学习)|不如换.{0,6}(?:方式|问题|说)|超出.{0,6}(?:能力|范围)|(?:没有|无法)找到.{0,8}(?:答案|结果|内容)|(?:暂时|还)回答不)/i.test(
+  return /(?:我(?:还|暂时|暂不|也)?(?:不知道|不知道咋说|不太清楚|不支持|不会|回答不上)|不太清楚|无法(?:回答|理解|获取|处理)|没法回答|回答不了|没(?:听懂|听清)|不明白.{0,8}(?:说|意思)|换个(?:问题|方式)|再说(?:一)?遍|我还在学习|(?:你|我).{0,4}(?:问住|难住)了|被难住了(?:诶|呢|呀|哦)?|暂不支持(?:该|此)?功能|不知道咋说|还.{0,4}(?:支持.{0,6}功能|学习)|不如换.{0,6}(?:方式|问题|说)|超出.{0,6}(?:能力|范围)|(?:没有|无法)找到.{0,8}(?:答案|结果|内容)|(?:暂时|还)回答不)/i.test(
     text,
   );
 }
@@ -25,16 +26,17 @@ const kDefaultMaxTextLength = 100;
 async function waitForPlaybackIdle(engine, timeout = 700) {
   const MiNA = engine.MiNA;
   if (!MiNA?.getStatus) {
-    return;
+    return true;
   }
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     const status = await MiNA.getStatus().catch(() => undefined);
     if (!status || status.status !== 'playing') {
-      return;
+      return true;
     }
     await sleep(150);
   }
+  return false;
 }
 
 /** 按长度和标点切分文本，避免单次 TTS 过长导致播报失败 */
@@ -167,6 +169,44 @@ function resolveTTSProvider(tts) {
   return provider === 'xiaoai' ? 'xiaoai' : 'minimax';
 }
 
+/** 归一化语音文本：去掉唤醒词和首尾标点，便于和白名单做匹配 */
+function normalizePcText(text) {
+  return String(text)
+    .replace(/^(小爱同学|小爱)[，,。！!？?\s]*/, '')
+    .replace(/[\s。！？!?，,、~～]+$/g, '')
+    .trim();
+}
+
+/**
+ * 在白名单里找指令：先精确匹配，再允许「帮我打开浏览器」这类前后缀说法（取最长命中）。
+ *
+ * 只返回白名单里配置好的命令，文本本身不参与命令拼接，因此不存在命令注入。
+ */
+function matchPcCommand(pcControl, text) {
+  const commands = pcControl?.commands ?? {};
+  const normalized = normalizePcText(text);
+  if (!normalized) {
+    return undefined;
+  }
+  if (Object.prototype.hasOwnProperty.call(commands, normalized)) {
+    return { key: normalized, command: commands[normalized] };
+  }
+  const keys = Object.keys(commands).sort((a, b) => b.length - a.length);
+  const key = keys.find((item) => item.length >= 2 && normalized.includes(item));
+  return key ? { key, command: commands[key] } : undefined;
+}
+
+/** 执行白名单命令，只关心成功与否，不把输出播报出去 */
+function runPcCommand(command, timeout = 10000) {
+  const [file, args, options] = command ?? [];
+  if (!file) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    execFile(file, args ?? [], { timeout, ...(options ?? {}) }, (error) => resolve(!error));
+  });
+}
+
 /** 去掉 Markdown / 链接等不该被念出来的内容 */
 function toSpeakableText(text) {
   return String(text)
@@ -237,10 +277,30 @@ async function ensureTTSBaseURL(tts) {
         res.end();
       }
     });
-    await new Promise((resolve, reject) => {
-      ttsServer.once('error', reject);
-      ttsServer.listen(tts.port, '0.0.0.0', () => resolve());
-    });
+    const listen = (port) =>
+      new Promise((resolve, reject) => {
+        const onError = (error) => {
+          ttsServer.removeListener('listening', onListening);
+          reject(error);
+        };
+        const onListening = () => {
+          ttsServer.removeListener('error', onError);
+          resolve();
+        };
+        ttsServer.once('error', onError);
+        ttsServer.once('listening', onListening);
+        ttsServer.listen(port, '0.0.0.0');
+      });
+    try {
+      await listen(tts.port);
+    } catch (error) {
+      if (error?.code !== 'EADDRINUSE') {
+        throw error;
+      }
+      // 端口被占用时换随机端口，否则整条语音合成链路会静默降级成文本播报
+      console.warn(`⚠️ 语音服务端口 ${tts.port} 被占用，改用随机端口`);
+      await listen(0);
+    }
     const port = ttsServer.address().port;
     console.log(`🎙️ 本地语音服务已启动：http://${getLocalIPv4()}:${port}/tts/`);
   }
@@ -334,6 +394,57 @@ async function playMiniMax(engine, text) {
   );
   return played;
 }
+
+/**
+ * 播报指令执行结果。
+ *
+ * 必须走 MiNA 的 mibrain TTS（speaker.play({ text })）：
+ * 它能让语音助手「开口」，从而打断小爱正在生成/播放的原生回答。
+ * 注意 MiniMax 音频走的是 mediaplayer 通道，和小爱原生回答并行，抢不断，会出现两段声音叠着播。
+ */
+async function speakFeedback(engine, text) {
+  if (engine.speaker?.play) {
+    try {
+      if (await engine.speaker.play({ text })) {
+        return;
+      }
+    } catch (error) {
+      console.warn(`⚠️ MiNA 文本播报异常：${error?.message ?? error}`);
+    }
+  }
+  await playText(engine, text, { retries: 1, gap: 0 });
+}
+
+/**
+ * 语音控制电脑的白名单（默认关闭）
+ *
+ * 只会执行 commands 里配置好的固定命令：语音文本仅用于「选哪条命令」，不会被拼进命令里，
+ * 所以不存在命令注入。开启前请确认白名单里没有关机、删除等危险操作。
+ *
+ * 键是语音里要匹配的说法（命中规则：精确匹配，或文本包含该说法），值是 [命令, 参数数组]。
+ * 默认给的是 macOS 命令，Linux/Windows 自行替换。
+ */
+const pcControl = {
+  enabled: env('PC_CONTROL_ENABLED', 'false') === 'true',
+  /**
+   * 执行指令时压低音量的时长（毫秒）。
+   *
+   * 小爱原生兜底回答（"对不起""我还在学习中"）通常在说完话后 1-2s 才开口，
+   * 反复下发 stop 反而会让它重置后继续播，所以改为这段时间内把音量压到最低，
+   * 让它在静音里说完，再恢复音量播报结果。
+   *
+   * 设得越大越干净，但反馈播报也会相应推迟；设为 0 则不做处理。
+   */
+  muteMs: Number(env('PC_CONTROL_MUTE_MS', '2500')),
+  commands: {
+    打开浏览器: ['open', ['-a', 'Google Chrome']],
+    打开访达: ['open', ['-a', 'Finder']],
+    打开终端: ['open', ['-a', 'iTerm']],
+    锁屏: ['pmset', ['displaysleepnow']],
+    静音: ['osascript', ['-e', 'set volume output muted true']],
+    取消静音: ['osascript', ['-e', 'set volume output muted false']],
+  },
+};
 
 /**
  * @type {import('@mi-gpt/next').MiGPTConfig}
@@ -471,6 +582,13 @@ export default {
      */
     maxReplyLength: 100,
   },
+  /** 语音控制电脑（白名单定义见文件上方 pcControl） */
+  pcControl,
+  /**
+   * 命中电脑指令时跳过「等小爱原生回答」，让指令立即执行（省掉最多 2s）
+   */
+  shouldSkipNativeAnswerWait: (text) =>
+    pcControl.enabled && Boolean(matchPcCommand(pcControl, text)),
   /**
    * 只回答以下关键词开头的消息：
    *
@@ -482,6 +600,55 @@ export default {
    * 自定义消息回复
    */
   async onMessage(engine, msg) {
+    // 语音控制电脑：命中白名单就直接执行，不再走 LLM。
+    const pcConfig = engine.config?.pcControl;
+    if (pcConfig?.enabled) {
+      const hit = matchPcCommand(pcConfig, msg.text);
+      if (hit) {
+        console.log(`🖥️ 命中电脑指令：${hit.key}｜${msg.text}`);
+        const MiNA = engine.MiNA;
+        const muteMs = Number(pcConfig.muteMs ?? 2500);
+
+        // 实测反复 stop 会让小爱的原生回答播得更多（会被重置后继续），
+        // 所以改成「压低音量」：让小爱那段兜底话在静音里说完，恢复音量后再播报结果。
+        // 执行命令与压低音量并行，避免读音量那 400ms 拖慢电脑动作。
+        const okPromise = runPcCommand(hit.command);
+        let originalVolume;
+        if (muteMs > 0 && MiNA?.getVolume && MiNA?.setVolume) {
+          originalVolume = await MiNA.getVolume().catch(() => undefined);
+          if (typeof originalVolume === 'number') {
+            await MiNA.setVolume(6).catch(() => {});
+          }
+        }
+
+        let ok = false;
+        try {
+          ok = await okPromise;
+          if (ok) {
+            console.log(`✅ 电脑指令已执行：${hit.key}`);
+          } else {
+            console.warn(`❌ 电脑指令执行失败：${hit.key}`);
+          }
+          if (typeof originalVolume === 'number') {
+            console.log(`🔇 已压低音量 ${muteMs}ms，等小爱原生回答播完`);
+            await sleep(muteMs);
+          }
+        } finally {
+          if (typeof originalVolume === 'number') {
+            await MiNA.setVolume(originalVolume).catch(() => {});
+          }
+        }
+
+        // 拿不到音量时退化为单次打断，至少别让两段声音同时响
+        if (muteMs > 0 && typeof originalVolume !== 'number') {
+          await engine.speaker.abortXiaoAI().catch(() => {});
+        }
+
+        await speakFeedback(engine, ok ? '好的，已执行' : '执行失败了');
+        return { handled: true };
+      }
+    }
+
     if (!engine.config.callAIKeywords?.some((keyword) => msg.text.startsWith(keyword))) {
       console.log(`🧭 回答来源：小爱原生播报（未命中唤醒词，交给小爱自己答）｜${msg.text}`);
       return;
@@ -529,15 +696,19 @@ export default {
     // 等待小爱原生播报真正停止，否则新的 TTS 指令会被设备丢弃（无声音）。
     await waitForPlaybackIdle(engine);
 
-    // 思考提示只发一次：失败也不重试，避免为了占位白等 500ms。
-    await playText(engine, '正在思考中', { retries: 1, gap: 0 });
+    // 思考提示只发一次且不阻塞：指令已经下发就够占住 TTS 通道，
+    // 不必等 MIoT/MiNA 的响应（MIoT 失败回退 MiNA 要约 1s，白等没有意义）。
     const promptAt = Date.now();
+    const promptSettled = playText(engine, '正在思考中', { retries: 1, gap: 0 }).catch(() => {});
 
     const reply = await llmPromise;
     const text = reply?.text ?? '';
     const llmAt = Date.now();
 
     if (text) {
+      // 模型极快返回时，占位可能还在下发中，最多等 200ms，避免两条 TTS 抢播。
+      await Promise.race([promptSettled, sleep(200)]);
+
       const ttsProvider = resolveTTSProvider(engine.config?.tts);
       const voiceLabel =
         ttsProvider === 'minimax'
@@ -564,7 +735,7 @@ export default {
           : `❌ 回答来源：外接 LLM 播报失败（语音：${voiceLabel}，指令未生效）｜${text}`,
       );
       console.log(
-        `⏱️ 耗时 ${doneAt - startAt}ms（打断+占位 ${promptAt - startAt}ms，等 LLM ${llmAt - promptAt}ms，语音 ${doneAt - llmAt}ms；LLM 实际 ${llmMs}ms）`,
+        `⏱️ 耗时 ${doneAt - startAt}ms（打断+空闲 ${promptAt - startAt}ms，等 LLM ${llmAt - promptAt}ms，语音 ${doneAt - llmAt}ms；LLM 实际 ${llmMs}ms）`,
       );
     } else {
       console.warn('⚠️ 回答来源：外接 LLM 无返回，已改播兜底话术');

@@ -32,6 +32,15 @@ export class MiMessageManager {
   private readonly _sleep: NonNullable<MiMessageManagerOptions['sleep']>;
   private readonly _pendingPollInterval: number;
   private readonly _pendingPollTimeout: number;
+  private _skipNativeAnswerWait?: (text: string) => boolean;
+
+  /**
+   * 命中自定义指令（比如语音控制电脑）时不必等小爱生成原生回答，
+   * 直接把这轮消息返回，省掉最多 pendingPollTimeout 的等待。
+   */
+  setSkipNativeAnswerWait(predicate?: (text: string) => boolean) {
+    this._skipNativeAnswerWait = predicate;
+  }
 
   constructor(options: MiMessageManagerOptions = {}) {
     this._getConversations =
@@ -83,7 +92,8 @@ export class MiMessageManager {
     if (
       newest &&
       newest.timestamp > this._lastQueryMsg!.timestamp &&
-      !this._hasNativeAnswer(newest)
+      !this._hasNativeAnswer(newest) &&
+      !this._skipNativeAnswerWait?.(newest.text)
     ) {
       const completed = await this._waitForNativeAnswer(newest);
       if (!completed) {

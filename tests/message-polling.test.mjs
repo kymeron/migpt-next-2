@@ -54,6 +54,29 @@ test('fast-polls a new pending conversation until its native answer appears', as
   assert.deepEqual(sleeps, [100, 100]);
 });
 
+test('returns a pending conversation immediately when the skip predicate matches', async () => {
+  const oldRecord = answeredRecord('old', 1, '旧问题', '旧答案');
+  const pending = pendingRecord('new', 2, '打开浏览器');
+  const sleeps = [];
+  const manager = new MessageModule.MiMessageManager({
+    getConversations: createConversationSource([
+      { records: [oldRecord] },
+      { records: [pending, oldRecord] },
+    ]),
+    sleep: async (milliseconds) => sleeps.push(milliseconds),
+    pendingPollInterval: 100,
+    pendingPollTimeout: 500,
+  });
+  manager.setSkipNativeAnswerWait((text) => text.includes('打开浏览器'));
+
+  assert.equal(await manager.fetchNextMessage(), undefined);
+  const message = await manager.fetchNextMessage();
+
+  assert.equal(message.text, '打开浏览器');
+  assert.equal(message.metadata, undefined);
+  assert.deepEqual(sleeps, []);
+});
+
 test('does not consume a pending conversation when fast polling times out', async () => {
   const oldRecord = answeredRecord('old', 1, '旧问题', '旧答案');
   const pending = pendingRecord('new', 2, '新问题');

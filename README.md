@@ -119,6 +119,27 @@ MiOT 请求自动读取 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`（含小写�
 ### 5. 非流式问答
 `askAI(msg, { stream: false })` 走一次性补全而非流式输出——也是联网搜索生效的前提，配合 `onMessage` 可实现更稳定的单次问答。
 
+## 语音控制电脑（可选，默认关闭）
+
+开启后在 `.env` 里设置 `PC_CONTROL_ENABLED=true`，然后在 `config.js` 的 `pcControl.commands` 里配置白名单：
+
+```js
+  pcControl: {
+    enabled: env('PC_CONTROL_ENABLED', 'false') === 'true',
+    commands: {
+      打开浏览器: ['open', ['-a', 'Safari']],
+      锁屏: ['pmset', ['displaysleepnow']],
+      静音: ['osascript', ['-e', 'set volume output muted true']],
+    },
+  },
+```
+
+说出「打开浏览器」这类指令（中间带「帮我」等前后缀也能命中）即会执行并播报「好的，已执行」。
+
+命中白名单的消息会**跳过「等小爱原生回答」**（最多省 2s），并且打断小爱与执行命令并行，剩下的延迟基本只剩 500ms 的消息轮询。
+
+安全约定：语音文本只用来**选命令**，不会被拼进 shell，因此无法注入；请只放固定、安全的命令，不要加关机、删除、`sudo` 这类操作。
+
 ## 本地构建与运行
 
 ```shell
